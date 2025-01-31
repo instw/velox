@@ -86,28 +86,6 @@ DEFINE_int64(arbitrator_capacity, 6L << 30, "Arbitrator capacity in bytes.");
 
 using namespace facebook::velox::exec;
 
-namespace {
-std::unique_ptr<test::ReferenceQueryRunner> setupReferenceQueryRunner(
-    facebook::velox::memory::MemoryPool* aggregatePool,
-    const std::string& prestoUrl,
-    const std::string& runnerName,
-    const uint32_t& reqTimeoutMs) {
-  if (prestoUrl.empty()) {
-    auto duckQueryRunner =
-        std::make_unique<test::DuckQueryRunner>(aggregatePool);
-    LOG(INFO) << "Using DuckDB as the reference DB.";
-    return duckQueryRunner;
-  }
-
-  LOG(INFO) << "Using Presto as the reference DB.";
-  return std::make_unique<test::PrestoQueryRunner>(
-      aggregatePool,
-      prestoUrl,
-      runnerName,
-      static_cast<std::chrono::milliseconds>(reqTimeoutMs));
-}
-} // namespace
-
 int main(int argc, char** argv) {
   // Calls common init functions in the necessary order, initializing
   // singletons, installing proper signal handlers for better debugging
@@ -116,7 +94,7 @@ int main(int argc, char** argv) {
   test::setupMemory(FLAGS_allocator_capacity, FLAGS_arbitrator_capacity);
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool{
       facebook::velox::memory::memoryManager()->addRootPool()};
-  auto referenceQueryRunner = setupReferenceQueryRunner(
+  auto referenceQueryRunner = test::setupReferenceQueryRunner(
       rootPool.get(),
       FLAGS_presto_url,
       "row_number_fuzzer",

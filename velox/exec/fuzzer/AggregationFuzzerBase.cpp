@@ -813,34 +813,6 @@ void persistReproInfo(
   }
 }
 
-std::unique_ptr<ReferenceQueryRunner> setupReferenceQueryRunner(
-    memory::MemoryPool* aggregatePool,
-    const std::string& prestoUrl,
-    const std::string& runnerName,
-    const uint32_t& reqTimeoutMs) {
-  if (prestoUrl.empty()) {
-    auto duckQueryRunner = std::make_unique<DuckQueryRunner>(aggregatePool);
-    duckQueryRunner->disableAggregateFunctions({
-        "skewness",
-        // DuckDB results on constant inputs are incorrect. Should be NaN,
-        // but DuckDB returns some random value.
-        "kurtosis",
-        "entropy",
-        // Regr_count result in DuckDB is incorrect when the input data is null.
-        "regr_count",
-    });
-    LOG(INFO) << "Using DuckDB as the reference DB.";
-    return duckQueryRunner;
-  } else {
-    return std::make_unique<PrestoQueryRunner>(
-        aggregatePool,
-        prestoUrl,
-        runnerName,
-        static_cast<std::chrono::milliseconds>(reqTimeoutMs));
-    LOG(INFO) << "Using Presto as the reference DB.";
-  }
-}
-
 std::vector<std::string> retrieveWindowFunctionName(
     const core::PlanNodePtr& node) {
   auto windowNode = std::dynamic_pointer_cast<const core::WindowNode>(node);
