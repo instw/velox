@@ -17,30 +17,28 @@
 #include <folly/init/Init.h>
 #include <gflags/gflags.h>
 
-#include "velox/common/file/FileSystems.h"
 #include "velox/common/memory/SharedArbitrator.h"
-#include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/MemoryReclaimer.h"
 #include "velox/exec/fuzzer/DuckQueryRunner.h"
 #include "velox/exec/fuzzer/FuzzerUtil.h"
 #include "velox/exec/fuzzer/PrestoQueryRunner.h"
 #include "velox/exec/fuzzer/ReferenceQueryRunner.h"
-#include "velox/exec/fuzzer/RowNumberFuzzer.h"
+#include "velox/exec/fuzzer/TopNRowNumberFuzzer.h"
 
-/// RowNumberFuzzerRunner leverages RowNumberFuzzer and VectorFuzzer to
-/// automatically generate and execute the fuzzer. It works as follows:
+/// TopNRowNumberFuzzerRunner leverages TopNRowNumberFuzzer and VectorFuzzer to
+/// automatically generate and execute tests. It works as follows:
 ///
-///  1. Plan Generation: Generate two equivalent query plans, one is row-number
-///     over ValuesNode and the other is over TableScanNode.
+///  1. Plan Generation: Generate two equivalent query plans, one is
+///     topn-row-number over ValuesNode and the other is over TableScanNode.
 ///  2. Executes a variety of logically equivalent query plans and checks the
 ///     results are the same.
 ///  3. Rinse and repeat.
 ///
 /// It is used as follows:
 ///
-///  $ ./velox_row_number_fuzzer --duration_sec 600
+///  $ ./velox_topn_row_number_fuzzer_test --duration_sec 600
 ///
-/// The flags that configure RowNumberFuzzer's behavior are:
+/// The flags that configure TopNRowNumberFuzzer's behavior are:
 ///
 ///  --steps: how many iterations to run.
 ///  --duration_sec: alternatively, for how many seconds it should run (takes
@@ -49,12 +47,12 @@
 ///          will print a seed as part of the logs).
 ///  --v=1: verbose logging; print a lot more details about the execution.
 ///  --batch_size: size of input vector batches generated.
-///  --num_batches: number if input vector batches to generate.
+///  --num_batches: number of input vector batches to generate.
 ///  --enable_spill: test plans with spilling enabled.
 ///  --enable_oom_injection: randomly trigger OOM while executing query plans.
 /// e.g:
 ///
-///  $ ./velox_row_number_fuzzer \
+///  $ ./velox_topn_row_number_fuzzer_test \
 ///         --seed 123 \
 ///         --duration_sec 600 \
 ///         --v=1
@@ -82,23 +80,23 @@ DEFINE_int64(allocator_capacity, 8L << 30, "Allocator capacity in bytes.");
 
 DEFINE_int64(arbitrator_capacity, 6L << 30, "Arbitrator capacity in bytes.");
 
-using namespace facebook::velox::exec;
+using namespace facebook::velox;
 
 namespace {
-std::unique_ptr<test::ReferenceQueryRunner> setupReferenceQueryRunner(
-    facebook::velox::memory::MemoryPool* aggregatePool,
+std::unique_ptr<exec::test::ReferenceQueryRunner> setupReferenceQueryRunner(
+    memory::MemoryPool* aggregatePool,
     const std::string& prestoUrl,
     const std::string& runnerName,
     const uint32_t& reqTimeoutMs) {
   if (prestoUrl.empty()) {
     auto duckQueryRunner =
-        std::make_unique<test::DuckQueryRunner>(aggregatePool);
+        std::make_unique<exec::test::DuckQueryRunner>(aggregatePool);
     LOG(INFO) << "Using DuckDB as the reference DB.";
     return duckQueryRunner;
   }
 
   LOG(INFO) << "Using Presto as the reference DB.";
-  return std::make_unique<test::PrestoQueryRunner>(
+  return std::make_unique<exec::test::PrestoQueryRunner>(
       aggregatePool,
       prestoUrl,
       runnerName,
@@ -111,14 +109,14 @@ int main(int argc, char** argv) {
   // singletons, installing proper signal handlers for better debugging
   // experience, and initialize glog and gflags.
   folly::Init init(&argc, &argv);
-  test::setupMemory(FLAGS_allocator_capacity, FLAGS_arbitrator_capacity);
-  std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool{
-      facebook::velox::memory::memoryManager()->addRootPool()};
+  exec::test::setupMemory(FLAGS_allocator_capacity, FLAGS_arbitrator_capacity);
+  std::shared_ptr<memory::MemoryPool> rootPool{
+      memory::memoryManager()->addRootPool()};
   auto referenceQueryRunner = setupReferenceQueryRunner(
       rootPool.get(),
       FLAGS_presto_url,
-      "row_number_fuzzer",
+      "topn_row_number_fuzzer",
       FLAGS_req_timeout_ms);
   const size_t initialSeed = FLAGS_seed == 0 ? std::time(nullptr) : FLAGS_seed;
-  rowNumberFuzzer(initialSeed, std::move(referenceQueryRunner));
+  topNRowNumberFuzzer(initialSeed, std::move(referenceQueryRunner));
 }

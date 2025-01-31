@@ -21,9 +21,17 @@
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/dwio/catalog/fbhive/FileUtils.h"
+#include "velox/dwio/dwrf/RegisterDwrfReader.h"
 #include "velox/dwio/dwrf/writer/Writer.h"
+#include "velox/exec/fuzzer/DuckQueryRunner.h"
+#include "velox/exec/fuzzer/PrestoQueryRunner.h"
+#include "velox/exec/tests/utils/AssertQueryBuilder.h"
+#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/expression/SignatureBinder.h"
 #include "velox/functions/prestosql/types/IPPrefixType.h"
+#include "velox/serializers/CompactRowSerializer.h"
+#include "velox/serializers/PrestoSerializer.h"
+#include "velox/serializers/UnsafeRowSerializer.h"
 
 using namespace facebook::velox::dwio::catalog::fbhive;
 
@@ -190,6 +198,18 @@ RowTypePtr concat(const RowTypePtr& a, const RowTypePtr& b) {
   return ROW(std::move(names), std::move(types));
 }
 
+std::vector<RowVectorPtr> flatten(const std::vector<RowVectorPtr>& vectors) {
+  std::vector<RowVectorPtr> flatVectors;
+  for (const auto& vector : vectors) {
+    auto flat = BaseVector::create<RowVector>(
+        vector->type(), vector->size(), vector->pool());
+    flat->copy(vector.get(), 0, 0, vector->size());
+    flatVectors.push_back(flat);
+  }
+
+  return flatVectors;
+}
+
 // Sometimes we generate zero-column input of type ROW({}) or a column of type
 // UNKNOWN(). Such data cannot be written to a file and therefore cannot
 // be tested with TableScan.
@@ -201,6 +221,11 @@ bool isTableScanSupported(const TypePtr& type) {
     return false;
   }
   if (type->kind() == TypeKind::HUGEINT) {
+    return false;
+  }
+  // Disable testing with TableScan when input contains TIMESTAMP type, due to
+  // the issue #8127.
+  if (type->kind() == TypeKind::TIMESTAMP) {
     return false;
   }
 
@@ -378,6 +403,26 @@ void registerHiveConnector(
   connector::registerConnector(hiveConnector);
 }
 
+void setupReadWrite() {
+  filesystems::registerLocalFileSystem();
+  dwrf::registerDwrfReaderFactory();
+
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kPresto)) {
+    serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kCompactRow)) {
+    serializer::CompactRowVectorSerde::registerNamedVectorSerde();
+  }
+  if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kUnsafeRow)) {
+    serializer::spark::UnsafeRowVectorSerde::registerNamedVectorSerde();
+  }
+
+  // Make sure not to run out of open file descriptors.
+  std::unordered_map<std::string, std::string> hiveConfig = {
+      {connector::hive::HiveConfig::kNumCacheFileHandles, "1000"}};
+  registerHiveConnector(hiveConfig);
+}
+
 std::pair<std::optional<MaterializedRowMultiset>, ReferenceQueryErrorCode>
 computeReferenceResults(
     const core::PlanNodePtr& plan,
@@ -390,5 +435,70 @@ computeReferenceResultsAsVector(
     const core::PlanNodePtr& plan,
     ReferenceQueryRunner* referenceQueryRunner) {
   return referenceQueryRunner->executeAndReturnVector(plan);
+}
+
+RowVectorPtr execute(
+    const PlanWithSplits& plan,
+    const std::shared_ptr<memory::MemoryPool>& pool,
+    bool injectSpill,
+    bool injectOOM,
+    const std::optional<std::string>& spillConfig,
+    int maxSpillLevel) {
+  LOG(INFO) << "Executing query plan: " << plan.plan->toString(true, true);
+
+  AssertQueryBuilder builder(plan.plan);
+  if (!plan.splits.empty()) {
+    builder.splits(plan.splits);
+  }
+
+  int32_t spillPct{0};
+  if (injectSpill) {
+    VELOX_CHECK(
+        spillConfig.has_value(),
+        "Spill config not set for execute with spilling");
+    VELOX_CHECK_GE(
+        maxSpillLevel, 0, "Max spill should be set for execute with spilling");
+    std::shared_ptr<TempDirectoryPath> spillDirectory;
+    spillDirectory = exec::test::TempDirectoryPath::create();
+    builder.config(core::QueryConfig::kSpillEnabled, true)
+        .config(core::QueryConfig::kMaxSpillLevel, maxSpillLevel)
+        .config(spillConfig.value(), true)
+        .spillDirectory(spillDirectory->getPath());
+    spillPct = 10;
+  }
+
+  ScopedOOMInjector oomInjector(
+      []() -> bool { return folly::Random::oneIn(10); },
+      10); // Check the condition every 10 ms.
+  if (injectOOM) {
+    oomInjector.enable();
+  }
+
+  // Wait for the task to be destroyed before start next query execution to
+  // avoid the potential interference of the background activities across query
+  // executions.
+  auto stopGuard = folly::makeGuard([&]() { waitForAllTasksToBeDeleted(); });
+
+  TestScopedSpillInjection scopedSpillInjection(spillPct);
+  RowVectorPtr result;
+  try {
+    result = builder.copyResults(pool.get());
+  } catch (VeloxRuntimeError& e) {
+    if (injectOOM &&
+        e.errorCode() == facebook::velox::error_code::kMemCapExceeded &&
+        e.message() == ScopedOOMInjector::kErrorMessage) {
+      // If we enabled OOM injection we expect the exception thrown by the
+      // ScopedOOMInjector.
+      return nullptr;
+    }
+
+    throw e;
+  }
+
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << std::endl << result->toString(0, result->size());
+  }
+
+  return result;
 }
 } // namespace facebook::velox::exec::test

@@ -31,6 +31,16 @@ struct SortingKeyAndOrder {
       : key_(std::move(key)), sortOrder_(std::move(sortOrder)) {}
 };
 
+struct PlanWithSplits {
+  core::PlanNodePtr plan;
+  std::vector<Split> splits;
+
+  explicit PlanWithSplits(
+      core::PlanNodePtr _plan,
+      const std::vector<Split>& _splits = {})
+      : plan(std::move(_plan)), splits(_splits) {}
+};
+
 /// Write the vector to the path.
 void writeToFile(
     const std::string& path,
@@ -86,6 +96,9 @@ bool isTableScanSupported(const TypePtr& type);
 /// Concat two RowTypes.
 RowTypePtr concat(const RowTypePtr& a, const RowTypePtr& b);
 
+/// Flatten the input vectors for printing.
+std::vector<RowVectorPtr> flatten(const std::vector<RowVectorPtr>& vectors);
+
 /// Skip queries that use Timestamp, Varbinary, and IntervalDayTime types.
 /// DuckDB doesn't support nanosecond precision for timestamps or casting from
 /// Bigint to Interval.
@@ -119,11 +132,15 @@ TypePtr sanitizeTryResolveType(
     const std::unordered_map<std::string, TypePtr>& typeVariablesBindings,
     std::unordered_map<std::string, int>& integerVariablesBindings);
 
-// Invoked to set up memory system with arbitration.
+/// Invoked to set up memory system with arbitration.
 void setupMemory(
     int64_t allocatorCapacity,
     int64_t arbitratorCapacity,
     bool enableGlobalArbitration = true);
+
+/// Sets up the Dwrf reader/writer, serializers and Hive connector for the
+/// fuzzers.
+void setupReadWrite();
 
 /// Registers hive connector with configs. It should be called in the
 /// constructor of fuzzers that test plans with TableScan or uses
@@ -147,5 +164,14 @@ std::pair<std::optional<std::vector<RowVectorPtr>>, ReferenceQueryErrorCode>
 computeReferenceResultsAsVector(
     const core::PlanNodePtr& plan,
     ReferenceQueryRunner* referenceQueryRunner);
+
+/// Executes a plan with spilling and oom injection possibly.
+RowVectorPtr execute(
+    const PlanWithSplits& plan,
+    const std::shared_ptr<memory::MemoryPool>& pool,
+    bool injectSpill,
+    bool injectOOM,
+    const std::optional<std::string>& spillConfig = std::nullopt,
+    int maxSpillLevel = -1);
 
 } // namespace facebook::velox::exec::test
